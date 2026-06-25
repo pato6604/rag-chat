@@ -2,6 +2,7 @@ import json
 import tempfile
 import os
 from pathlib import Path
+from collections.abc import AsyncGenerator
 from uuid import uuid4
 
 from openai import OpenAI
@@ -176,3 +177,65 @@ def chat(message: str, session_id: str = "default") -> tuple[str, list[str]]:
     )
 
     return completion.choices[0].message.content, list(sources)
+
+
+async def chat_stream(
+    message: str,
+    session_id: str = "default",
+) -> AsyncGenerator[dict[str, str | list[str]], None]:
+    """Query RAG and stream Gemini chunks, then emit the source list."""
+    init_rag()
+    client = _get_qdrant()
+    oai = _get_openai()
+
+    # Embed the query
+    resp = oai.embeddings.create(
+        model=settings.embedding_model,
+        input=[message],
+    )
+    query_vector = resp.data[0].embedding
+
+    # Search Qdrant
+    search_result = client.query_points(
+        collection_name=settings.collection_name,
+        query=query_vector,
+        limit=settings.top_k,
+    ).points
+
+    sources: list[str] = []
+    if not search_result:
+        # No docs ingested yet -- just chat, but still stream the response.
+        messages = [{"role": "user", "content": message}]
+    else:
+        chunks_text = []
+        source_names = set()
+        for hit in search_result:
+            chunks_text.append(hit.payload["text"])
+            source_names.add(hit.payload.get("source", "unknown"))
+
+        context = "\n\n---\n\n".join(chunks_text)
+        sources = list(source_names)
+
+        system_prompt = (
+            "Eres un asistente de RAG. Usa el siguiente contexto para responder "
+            "la pregunta del usuario. Si no encontrás la respuesta en el contexto, "
+            "decí que no lo sabes. Respondé en español.\n\n"
+            f"Contexto:\n{context}"
+        )
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": message},
+        ]
+
+    stream = oai.chat.completions.create(
+        model=settings.chat_model,
+        messages=messages,
+        stream=True,
+    )
+
+    for chunk in stream:
+        content = chunk.choices[0].delta.content
+        if content:
+            yield {"type": "chunk", "content": content}
+
+    yield {"type": "done", "sources": sources}

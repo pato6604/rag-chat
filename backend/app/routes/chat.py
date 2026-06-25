@@ -1,4 +1,7 @@
+import json
+
 from fastapi import APIRouter, HTTPException, UploadFile
+from fastapi.responses import StreamingResponse
 from openai import OpenAIError, RateLimitError
 
 from app.models import ChatRequest, ChatResponse, UploadResponse
@@ -31,6 +34,28 @@ async def chat_get(message: str, session_id: str = "default"):
     except OpenAIError as exc:
         _raise_openai_http_error(exc)
     return ChatResponse(response=response_text, sources=sources)
+
+
+@router.get("/chat/stream")
+async def chat_stream(message: str, session_id: str = "default"):
+    if not message.strip():
+        raise HTTPException(status_code=400, detail="Message cannot be empty")
+
+    async def event_stream():
+        try:
+            async for event in rag_engine.chat_stream(message, session_id):
+                yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+        except OpenAIError as exc:
+            status_message = str(exc)
+            if isinstance(exc, RateLimitError):
+                status_message = "Gemini está recargando, esperá 30 segundos"
+            yield (
+                "data: "
+                f"{json.dumps({'type': 'error', 'message': status_message}, ensure_ascii=False)}"
+                "\n\n"
+            )
+
+    return StreamingResponse(event_stream(), media_type="text/event-stream")
 
 
 @router.post("/upload", response_model=UploadResponse)

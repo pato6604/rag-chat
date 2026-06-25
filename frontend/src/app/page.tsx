@@ -11,6 +11,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import {
+  AlertTriangle,
   FileText,
   MessageSquare,
   PanelLeft,
@@ -24,6 +25,7 @@ type Message = {
   role: "user" | "assistant";
   content: string;
   sources?: string[];
+  error?: boolean;
 };
 
 type Session = {
@@ -48,9 +50,13 @@ export default function ChatPage() {
   ]);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
+  const [apiStatus, setApiStatus] = useState<"checking" | "ok" | "error">(
+    "checking",
+  );
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const scrollRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const streamControllerRef = useRef<AbortController | null>(null);
   const [sessions] = useState<Session[]>(MOCK_SESSIONS);
 
   const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
@@ -58,6 +64,77 @@ export default function ChatPage() {
   useEffect(() => {
     scrollRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages, loading]);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    const timeout = window.setTimeout(() => controller.abort(), 3000);
+
+    fetch(`${API_BASE}/health`, { signal: controller.signal })
+      .then((res) => {
+        setApiStatus(res.ok ? "ok" : "error");
+      })
+      .catch(() => {
+        setApiStatus("error");
+      })
+      .finally(() => {
+        window.clearTimeout(timeout);
+      });
+
+    return () => {
+      window.clearTimeout(timeout);
+      controller.abort();
+    };
+  }, [API_BASE]);
+
+  useEffect(() => {
+    return () => {
+      streamControllerRef.current?.abort();
+      streamControllerRef.current = null;
+    };
+  }, []);
+
+  function getErrorMessage(status?: number) {
+    if (status === 429) return "Gemini está recargando, esperá 30 segundos";
+    if (status === 502 || status === 503) {
+      return "El backend no responde. Verificá que el servidor esté corriendo.";
+    }
+    return "Error de conexión. Revisá que el backend esté corriendo en el puerto correcto.";
+  }
+
+  function appendAssistantError(content: string) {
+    setMessages((prev) => [
+      ...prev,
+      {
+        role: "assistant",
+        content,
+        error: true,
+      },
+    ]);
+  }
+
+  async function sendMessageFallback(messageText: string, status?: number) {
+    if (status && [400, 429, 502, 503].includes(status)) {
+      appendAssistantError(getErrorMessage(status));
+      return;
+    }
+
+    const res = await fetch(`${API_BASE}/api/chat`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ message: messageText, session_id: "default" }),
+    });
+
+    if (!res.ok) {
+      appendAssistantError(getErrorMessage(res.status));
+      return;
+    }
+
+    const data = await res.json();
+    setMessages((prev) => [
+      ...prev,
+      { role: "assistant", content: data.response, sources: data.sources },
+    ]);
+  }
 
   async function sendMessage() {
     if (!input.trim()) return;
@@ -67,27 +144,140 @@ export default function ChatPage() {
     setInput("");
     setLoading(true);
 
+    streamControllerRef.current?.abort();
+    const streamController = new AbortController();
+    streamControllerRef.current = streamController;
+
     try {
-      const res = await fetch(`${API_BASE}/api/chat`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ message: messageText, session_id: "default" }),
+      const params = new URLSearchParams({
+        message: messageText,
+        session_id: "default",
       });
-      const data = await res.json();
-      setMessages((prev) => [
-        ...prev,
-        { role: "assistant", content: data.response, sources: data.sources },
-      ]);
-    } catch {
-      setMessages((prev) => [
-        ...prev,
-        {
-          role: "assistant",
-          content: "Error conectando con el backend.",
-        },
-      ]);
+      const res = await fetch(`${API_BASE}/api/chat/stream?${params}`, {
+        signal: streamController.signal,
+      });
+      const contentType = res.headers.get("content-type") || "";
+
+      if (!res.ok) {
+        streamController.abort();
+        if (streamControllerRef.current === streamController) {
+          streamControllerRef.current = null;
+        }
+        await sendMessageFallback(messageText, res.status);
+        return;
+      }
+
+      if (!res.body || !contentType.includes("text/event-stream")) {
+        streamController.abort();
+        if (streamControllerRef.current === streamController) {
+          streamControllerRef.current = null;
+        }
+        await sendMessageFallback(messageText);
+        return;
+      }
+
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      let assistantIndex: number | null = null;
+
+      const processEvent = (rawEvent: string) => {
+        const dataLines = rawEvent
+          .split("\n")
+          .filter((line) => line.startsWith("data:"))
+          .map((line) => line.slice(5).trim());
+
+        if (dataLines.length === 0) return false;
+
+        const event = JSON.parse(dataLines.join("\n")) as
+          | { type: "chunk"; content: string }
+          | { type: "done"; sources: string[] }
+          | { type: "error"; message: string };
+
+        if (event.type === "chunk") {
+          if (assistantIndex === null) {
+            setLoading(false);
+            setMessages((prev) => {
+              assistantIndex = prev.length;
+              return [
+                ...prev,
+                { role: "assistant", content: event.content },
+              ];
+            });
+            return false;
+          }
+
+          setMessages((prev) =>
+            prev.map((msg, index) =>
+              index === assistantIndex
+                ? { ...msg, content: msg.content + event.content }
+                : msg,
+            ),
+          );
+          return false;
+        }
+
+        if (event.type === "done") {
+          if (assistantIndex !== null) {
+            setMessages((prev) =>
+              prev.map((msg, index) =>
+                index === assistantIndex
+                  ? { ...msg, sources: event.sources }
+                  : msg,
+              ),
+            );
+          }
+          streamController.abort();
+          if (streamControllerRef.current === streamController) {
+            streamControllerRef.current = null;
+          }
+          setLoading(false);
+          return true;
+        }
+
+        streamController.abort();
+        if (streamControllerRef.current === streamController) {
+          streamControllerRef.current = null;
+        }
+        setLoading(false);
+        appendAssistantError(event.message);
+        return true;
+      };
+
+      let streamComplete = false;
+
+      while (!streamComplete) {
+        const { value, done } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const events = buffer.split("\n\n");
+        buffer = events.pop() || "";
+        for (const event of events) {
+          streamComplete = processEvent(event);
+          if (streamComplete) break;
+        }
+      }
+
+      if (!streamComplete) {
+        buffer += decoder.decode();
+        if (buffer.trim()) processEvent(buffer);
+      }
+    } catch (error) {
+      if (error instanceof DOMException && error.name === "AbortError") {
+        return;
+      }
+
+      streamController.abort();
+      if (streamControllerRef.current === streamController) {
+        streamControllerRef.current = null;
+      }
+      appendAssistantError(getErrorMessage());
     } finally {
-      setLoading(false);
+      if (streamControllerRef.current === streamController) {
+        streamControllerRef.current = null;
+        setLoading(false);
+      }
     }
   }
 
@@ -111,6 +301,10 @@ export default function ChatPage() {
         method: "POST",
         body: form,
       });
+      if (!res.ok) {
+        appendAssistantError(getErrorMessage(res.status));
+        return;
+      }
       const data = await res.json();
       setMessages((prev) => [
         ...prev,
@@ -120,13 +314,7 @@ export default function ChatPage() {
         },
       ]);
     } catch {
-      setMessages((prev) => [
-        ...prev,
-        {
-          role: "assistant",
-          content: "Error al subir el archivo.",
-        },
-      ]);
+      appendAssistantError(getErrorMessage());
     }
 
     if (fileInputRef.current) fileInputRef.current.value = "";
@@ -211,6 +399,35 @@ export default function ChatPage() {
             <h1 className="truncate text-base font-semibold">
               Analisis de documentos
             </h1>
+            <span
+              className="inline-flex items-center rounded-full px-1"
+              title={
+                apiStatus === "ok"
+                  ? "API conectada"
+                  : apiStatus === "error"
+                    ? "API sin respuesta"
+                    : "Verificando API"
+              }
+              aria-label={
+                apiStatus === "ok"
+                  ? "API conectada"
+                  : apiStatus === "error"
+                    ? "API sin respuesta"
+                    : "Verificando API"
+              }
+            >
+              <span
+                className={`text-sm ${
+                  apiStatus === "ok"
+                    ? "text-[#3ecf8e]"
+                    : apiStatus === "error"
+                      ? "text-[#ef4444]"
+                      : "text-muted-foreground"
+                }`}
+              >
+                ●
+              </span>
+            </span>
           </div>
           <div className="flex items-center gap-2">
             <input
@@ -249,11 +466,18 @@ export default function ChatPage() {
                         ${
                           m.role === "user"
                             ? "bg-[#3ecf8e] text-[#0f0f0f] shadow-[0_14px_34px_rgba(62,207,142,0.14)]"
+                            : m.error
+                              ? "error-message text-[#fafafa]"
                             : "glass-panel gradient-border text-[#fafafa]"
                         }
                       `}
                     >
-                      <p className="whitespace-pre-wrap">{m.content}</p>
+                      <div className="flex items-start gap-2">
+                        {m.error && (
+                          <AlertTriangle className="mt-0.5 size-4 shrink-0 text-[#ef4444]" />
+                        )}
+                        <p className="whitespace-pre-wrap">{m.content}</p>
+                      </div>
                       {m.sources && m.sources.length > 0 && (
                         <div className="mt-2 flex flex-wrap gap-1.5 border-t border-[#2e2e2e] pt-2">
                           {m.sources.map((src, j) => (
