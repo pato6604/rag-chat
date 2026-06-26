@@ -78,6 +78,30 @@ def _ensure_collection(client: QdrantClient) -> None:
         )
 
 
+def _clear_all_points(client: QdrantClient) -> None:
+    """Delete all points from the collection by scrolling and deleting in batches.
+
+    Uses scroll+delete instead of delete_collection+recreate because the latter
+    can have caching issues with Qdrant local (persistent) mode.
+    """
+    next_offset = None
+    while True:
+        points, next_offset = client.scroll(
+            collection_name=settings.collection_name,
+            limit=1000,
+            offset=next_offset,
+            with_payload=False,
+            with_vectors=False,
+        )
+        if not points:
+            break
+        ids = [p.id for p in points]
+        client.delete(
+            collection_name=settings.collection_name,
+            points_selector=ids,
+        )
+
+
 def _chunk_text(text: str) -> list[str]:
     """Simple chunking by character count with overlap."""
     chunks = []
@@ -134,6 +158,8 @@ def ingest_bytes(data: bytes, filename: str) -> int:
 
     chunks = _chunk_text(text)
 
+    _clear_all_points(client)
+
     # Get embeddings from Gemini via OpenAI-compatible endpoint
     embeddings = []
     for start in range(0, len(chunks), 100):
@@ -145,9 +171,6 @@ def ingest_bytes(data: bytes, filename: str) -> int:
             )
         )
         embeddings.extend(e.embedding for e in resp.data)
-
-    client.delete_collection(collection_name=settings.collection_name)
-    _ensure_collection(client)
 
     # Store in Qdrant
     points = []
