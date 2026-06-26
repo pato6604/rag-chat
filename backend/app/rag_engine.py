@@ -20,7 +20,17 @@ _openai: OpenAI | None = None
 def _get_qdrant() -> QdrantClient:
     global _client
     if _client is None:
-        _client = QdrantClient(path=":memory:")
+        if settings.QDRANT_MODE == "cloud":
+            if not settings.qdrant_url or not settings.qdrant_api_key:
+                raise ValueError(
+                    "QDRANT_URL y QDRANT_API_KEY son obligatorios cuando QDRANT_MODE=cloud"
+                )
+            _client = QdrantClient(
+                url=settings.qdrant_url,
+                api_key=settings.qdrant_api_key,
+            )
+        else:
+            _client = QdrantClient(path=settings.qdrant_path)
     return _client
 
 

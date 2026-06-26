@@ -1,5 +1,4 @@
 #!/usr/bin/bash
-source "$LOCALAPPDATA/hermes/.env" 2>/dev/null
-cd "/c/Users/Patricio Quintana/Esperanto/backend"
-export GOOGLE_API_KEY
-python -m uvicorn app.main:app --host 0.0.0.0 --port 8002
+cd "/c/Users/Patricio Quintana/rag-project/backend"
+source venv/Scripts/activate
+python -m uvicorn app.main:app --reload --port ${PORT:-8000}

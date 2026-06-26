@@ -50,6 +50,7 @@ export default function ChatPage() {
   ]);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
+  const [streaming, setStreaming] = useState(false);
   const [apiStatus, setApiStatus] = useState<"checking" | "ok" | "error">(
     "checking",
   );
@@ -63,7 +64,7 @@ export default function ChatPage() {
 
   useEffect(() => {
     scrollRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages, loading]);
+  }, [messages, loading, streaming]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -94,7 +95,9 @@ export default function ChatPage() {
   }, []);
 
   function getErrorMessage(status?: number) {
-    if (status === 429) return "Gemini está recargando, esperá 30 segundos";
+    if (status === 429) {
+      return "Atención: Gemini está recargando, esperá 30 segundos y volvé a preguntar";
+    }
     if (status === 502 || status === 503) {
       return "El backend no responde. Verificá que el servidor esté corriendo.";
     }
@@ -102,11 +105,14 @@ export default function ChatPage() {
   }
 
   function appendAssistantError(content: string) {
+    const visibleContent = content.toLowerCase().includes("gemini")
+      ? `Atención: ${content.replace(/^Atención:\s*/i, "")}`
+      : content;
     setMessages((prev) => [
       ...prev,
       {
         role: "assistant",
-        content,
+        content: visibleContent,
         error: true,
       },
     ]);
@@ -156,12 +162,24 @@ export default function ChatPage() {
     setMessages((prev) => [...prev, userMsg]);
     setInput("");
     setLoading(true);
+    setStreaming(false);
 
     streamControllerRef.current?.abort();
     const streamController = new AbortController();
     streamControllerRef.current = streamController;
+    let streamTimedOut = false;
+    let streamTimeout: number | undefined;
+
+    const resetStreamTimeout = () => {
+      if (streamTimeout) window.clearTimeout(streamTimeout);
+      streamTimeout = window.setTimeout(() => {
+        streamTimedOut = true;
+        streamController.abort();
+      }, 60000);
+    };
 
     try {
+      resetStreamTimeout();
       const params = new URLSearchParams({
         message: messageText,
         session_id: "default",
@@ -176,6 +194,8 @@ export default function ChatPage() {
         if (streamControllerRef.current === streamController) {
           streamControllerRef.current = null;
         }
+        setStreaming(false);
+        setLoading(false);
         await sendMessageFallback(messageText, res.status);
         return;
       }
@@ -185,6 +205,8 @@ export default function ChatPage() {
         if (streamControllerRef.current === streamController) {
           streamControllerRef.current = null;
         }
+        setStreaming(false);
+        setLoading(false);
         await sendMessageFallback(messageText);
         return;
       }
@@ -208,6 +230,7 @@ export default function ChatPage() {
           | { type: "error"; message: string };
 
         if (event.type === "chunk") {
+          setStreaming(true);
           if (assistantIndex === null) {
             setLoading(false);
             setMessages((prev) => {
@@ -244,6 +267,7 @@ export default function ChatPage() {
           if (streamControllerRef.current === streamController) {
             streamControllerRef.current = null;
           }
+          setStreaming(false);
           setLoading(false);
           return true;
         }
@@ -252,6 +276,7 @@ export default function ChatPage() {
         if (streamControllerRef.current === streamController) {
           streamControllerRef.current = null;
         }
+        setStreaming(false);
         setLoading(false);
         appendAssistantError(event.message);
         return true;
@@ -262,6 +287,7 @@ export default function ChatPage() {
       while (!streamComplete) {
         const { value, done } = await reader.read();
         if (done) break;
+        resetStreamTimeout();
 
         buffer += decoder.decode(value, { stream: true });
         const events = buffer.split("\n\n");
@@ -278,6 +304,9 @@ export default function ChatPage() {
       }
     } catch (error) {
       if (error instanceof DOMException && error.name === "AbortError") {
+        if (streamTimedOut) {
+          appendAssistantError("La conexión tardó demasiado. Volvé a intentar en unos segundos.");
+        }
         return;
       }
 
@@ -286,10 +315,14 @@ export default function ChatPage() {
         streamControllerRef.current = null;
       }
       appendAssistantError(getErrorMessage());
+      setLoading(false);
+      setStreaming(false);
     } finally {
+      if (streamTimeout) window.clearTimeout(streamTimeout);
       if (streamControllerRef.current === streamController) {
         streamControllerRef.current = null;
         setLoading(false);
+        setStreaming(false);
       }
     }
   }
@@ -519,14 +552,16 @@ export default function ChatPage() {
                   </div>
                 ))}
 
-                {loading && (
+                {(loading || streaming) && (
                   <div className="message-enter flex justify-start">
                     <div className="glass-panel gradient-border rounded-2xl px-4 py-3">
                       <div className="flex items-center gap-2 text-muted-foreground">
                         <span className="typing-dot size-2 rounded-full bg-[#3ecf8e]" />
                         <span className="typing-dot size-2 rounded-full bg-[#3ecf8e]" />
                         <span className="typing-dot size-2 rounded-full bg-[#3ecf8e]" />
-                        <span className="ml-1 text-sm">Pensando...</span>
+                        <span className="ml-1 text-sm">
+                          {streaming ? "Respondiendo..." : "Pensando..."}
+                        </span>
                       </div>
                     </div>
                   </div>
