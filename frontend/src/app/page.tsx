@@ -112,6 +112,19 @@ export default function ChatPage() {
     ]);
   }
 
+  async function getResponseErrorMessage(res: Response) {
+    try {
+      const data = await res.json();
+      if (data && typeof data.detail === "string") {
+        return data.detail;
+      }
+    } catch {
+      // Keep the existing status-based fallback when the backend does not return JSON.
+    }
+
+    return getErrorMessage(res.status);
+  }
+
   async function sendMessageFallback(messageText: string, status?: number) {
     if (status && [400, 429, 502, 503].includes(status)) {
       appendAssistantError(getErrorMessage(status));
@@ -125,7 +138,7 @@ export default function ChatPage() {
     });
 
     if (!res.ok) {
-      appendAssistantError(getErrorMessage(res.status));
+      appendAssistantError(await getResponseErrorMessage(res));
       return;
     }
 
@@ -302,7 +315,7 @@ export default function ChatPage() {
         body: form,
       });
       if (!res.ok) {
-        appendAssistantError(getErrorMessage(res.status));
+        appendAssistantError(await getResponseErrorMessage(res));
         return;
       }
       const data = await res.json();

@@ -91,7 +91,12 @@ def ingest_bytes(data: bytes, filename: str) -> int:
     tmp.write(data)
     tmp.close()
     try:
-        text = _extract_text(tmp.name)
+        try:
+            text = _extract_text(tmp.name)
+        except Exception as exc:
+            if Path(filename).suffix.lower() == ".pdf":
+                raise ValueError("El archivo PDF está corrupto o no es un PDF válido") from exc
+            raise ValueError("No se pudo leer el archivo subido") from exc
     finally:
         os.unlink(tmp.name)
 
@@ -101,11 +106,14 @@ def ingest_bytes(data: bytes, filename: str) -> int:
     chunks = _chunk_text(text)
 
     # Get embeddings from Gemini via OpenAI-compatible endpoint
-    resp = oai.embeddings.create(
-        model=settings.embedding_model,
-        input=chunks,
-    )
-    embeddings = [e.embedding for e in resp.data]
+    embeddings = []
+    for start in range(0, len(chunks), 100):
+        batch = chunks[start:start + 100]
+        resp = oai.embeddings.create(
+            model=settings.embedding_model,
+            input=batch,
+        )
+        embeddings.extend(e.embedding for e in resp.data)
 
     # Store in Qdrant
     points = []

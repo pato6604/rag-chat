@@ -65,6 +65,8 @@ async def upload_file(file: UploadFile):
     data = await file.read()
     try:
         chunks = rag_engine.ingest_bytes(data, file.filename)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     except OpenAIError as exc:
         _raise_openai_http_error(exc)
     return UploadResponse(filename=file.filename, chunks=chunks, status="indexed")
