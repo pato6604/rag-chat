@@ -1,39 +1,15 @@
 import json
 import tempfile
 import os
-import time
 from pathlib import Path
 from collections.abc import AsyncGenerator
 from uuid import uuid4
 
-from openai import OpenAI, RateLimitError
+from openai import OpenAI
 from qdrant_client import QdrantClient
 from qdrant_client.models import Distance, VectorParams, PointStruct
 
 from app.config import settings
-
-
-# ── Retry helper ──────────────────────────────────────────────────────
-
-
-def _call_with_retry(fn, max_retries=3, base_delay=5):
-    """Execute fn with exponential backoff on RateLimitError.
-
-    Espera base_delay * 2^attempt segundos entre reintentos.
-    Solo reintenta si es RateLimitError (429). Otros errores se
-    propagan inmediatamente.
-    """
-    last_exc = None
-    for attempt in range(max_retries):
-        try:
-            return fn()
-        except RateLimitError as exc:
-            last_exc = exc
-            if attempt < max_retries - 1:
-                delay = base_delay * (2 ** attempt)
-                print(f"[retry] Gemini alcanzó el límite de rate, reintentando en {delay}s (intento {attempt + 1}/{max_retries})...")
-                time.sleep(delay)
-    raise last_exc  # type: ignore[misc]
 
 # ── Clients ──────────────────────────────────────────────────────────
 
@@ -143,11 +119,9 @@ def ingest_bytes(data: bytes, filename: str) -> int:
     embeddings = []
     for start in range(0, len(chunks), 100):
         batch = chunks[start:start + 100]
-        resp = _call_with_retry(
-            lambda: oai.embeddings.create(
-                model=settings.embedding_model,
-                input=batch,
-            )
+        resp = oai.embeddings.create(
+            model=settings.embedding_model,
+            input=batch,
         )
         embeddings.extend(e.embedding for e in resp.data)
 
@@ -175,11 +149,9 @@ def chat(message: str, session_id: str = "default") -> tuple[str, list[str]]:
     oai = _get_openai()
 
     # Embed the query
-    resp = _call_with_retry(
-        lambda: oai.embeddings.create(
-            model=settings.embedding_model,
-            input=[message],
-        )
+    resp = oai.embeddings.create(
+        model=settings.embedding_model,
+        input=[message],
     )
     query_vector = resp.data[0].embedding
 
@@ -192,11 +164,9 @@ def chat(message: str, session_id: str = "default") -> tuple[str, list[str]]:
 
     if not search_result:
         # No docs ingested yet — just chat
-        completion = _call_with_retry(
-            lambda: oai.chat.completions.create(
-                model=settings.chat_model,
-                messages=[{"role": "user", "content": message}],
-            )
+        completion = oai.chat.completions.create(
+            model=settings.chat_model,
+            messages=[{"role": "user", "content": message}],
         )
         return completion.choices[0].message.content, []
 
@@ -216,14 +186,12 @@ def chat(message: str, session_id: str = "default") -> tuple[str, list[str]]:
         f"Contexto:\n{context}"
     )
 
-    completion = _call_with_retry(
-        lambda: oai.chat.completions.create(
-            model=settings.chat_model,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": message},
-            ],
-        )
+    completion = oai.chat.completions.create(
+        model=settings.chat_model,
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": message},
+        ],
     )
 
     return completion.choices[0].message.content, list(sources)
@@ -239,11 +207,9 @@ async def chat_stream(
     oai = _get_openai()
 
     # Embed the query
-    resp = _call_with_retry(
-        lambda: oai.embeddings.create(
-            model=settings.embedding_model,
-            input=[message],
-        )
+    resp = oai.embeddings.create(
+        model=settings.embedding_model,
+        input=[message],
     )
     query_vector = resp.data[0].embedding
 
@@ -279,12 +245,10 @@ async def chat_stream(
             {"role": "user", "content": message},
         ]
 
-    stream = _call_with_retry(
-        lambda: oai.chat.completions.create(
-            model=settings.chat_model,
-            messages=messages,
-            stream=True,
-        )
+    stream = oai.chat.completions.create(
+        model=settings.chat_model,
+        messages=messages,
+        stream=True,
     )
 
     for chunk in stream:
