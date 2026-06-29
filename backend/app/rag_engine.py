@@ -65,40 +65,10 @@ def _get_openai() -> OpenAI:
 
 def _ensure_collection(client: QdrantClient) -> None:
     collections = [c.name for c in client.get_collections().collections]
-    if settings.collection_name in collections:
-        # Recreate if vector size mismatch
-        info = client.get_collection(settings.collection_name)
-        if info.config.params.vectors.size != settings.vector_dim:
-            client.delete_collection(collection_name=settings.collection_name)
-            collections.remove(settings.collection_name)
     if settings.collection_name not in collections:
         client.create_collection(
             collection_name=settings.collection_name,
             vectors_config=VectorParams(size=settings.vector_dim, distance=Distance.COSINE),
-        )
-
-
-def _clear_all_points(client: QdrantClient) -> None:
-    """Delete all points from the collection by scrolling and deleting in batches.
-
-    Uses scroll+delete instead of delete_collection+recreate because the latter
-    can have caching issues with Qdrant local (persistent) mode.
-    """
-    next_offset = None
-    while True:
-        points, next_offset = client.scroll(
-            collection_name=settings.collection_name,
-            limit=1000,
-            offset=next_offset,
-            with_payload=False,
-            with_vectors=False,
-        )
-        if not points:
-            break
-        ids = [p.id for p in points]
-        client.delete(
-            collection_name=settings.collection_name,
-            points_selector=ids,
         )
 
 
@@ -158,7 +128,8 @@ def ingest_bytes(data: bytes, filename: str) -> int:
 
     chunks = _chunk_text(text)
 
-    _clear_all_points(client)
+    client.delete_collection(collection_name=settings.collection_name)
+    _ensure_collection(client)
 
     # Get embeddings from Gemini via OpenAI-compatible endpoint
     embeddings = []
